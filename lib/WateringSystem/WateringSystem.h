@@ -65,19 +65,21 @@ private:
         int elapsed = 0;
         for (int i = 0; i < durationSec; i++)
         {
-            delay(1000); // 阻塞式延时
             elapsed++;
-
-            // 每等待 1 秒，就执行一次外部传入的任务 (比如 MQTT loop)
-            if (yieldHandler)
+            // 内层循环：把 1秒 切成 20份 (每份 50ms)
+            // 这样 OTA 的响应延迟从 1000ms 降低到了 50ms
+            for (int k = 0; k < 20; k++)
             {
-                yieldHandler();
-            }
+                delay(50);
 
-            if (stopRequested)
-            {
-                Serial.println("[Watering] STOP signal received! Aborting...");
-                break; // 跳出 for 循环
+                // 检查停止信号 (响应也变快了)
+                if (stopRequested)
+                    Serial.println("[Watering] STOP signal received! Aborting...");
+                break;
+
+                // 频繁处理 OTA 和 MQTT
+                if (yieldHandler)
+                    yieldHandler();
             }
         }
 
@@ -292,7 +294,14 @@ public:
             #ifdef SYSTEM_MANUAL_TEST
             if (SYSTEM_MANUAL_TEST)
             {
-                delay(10000);
+                for (int k = 0; k < 200; k++)
+                {
+                    delay(50);
+
+                    // 频繁处理 OTA 和 MQTT
+                    if (yieldHandler)
+                        yieldHandler();
+                }
             }
             #endif
             // MTEST:END
@@ -347,6 +356,31 @@ public:
     }
 
     int getCount() { return wateredCount; }
+
+    // 导出系统信息 (JSON 格式)
+    String getSystemInfoJson()
+    {
+        String json = "{";
+
+        // 1. 当前运行状态
+        json += "\"status\": \"" + String(systemEnabled ? "ACTIVE" : "KILLED") + "\",";
+        json += "\"is_busy\": " + String(isBusy ? "true" : "false") + ",";
+
+        // 2. 进度信息
+        json += "\"cycle_current\": " + String(wateredCount) + ",";
+        json += "\"cycle_max\": " + String(logic.maxCycles) + ",";
+
+        // 3. 配置参数 (这些值来自你的宏)
+        json += "\"interval_days\": " + String(logic.intervalDays) + ",";
+        json += "\"duration_sec\": " + String(durationSec) + ",";
+        json += "\"start_time\": \"" + String(logic.targetHour) + ":" + String(logic.targetMin < 10 ? "0" : "") + String(logic.targetMin) + "\",";
+
+        // 4. 系统开关
+        json += "\"persistence\": " + String(enableStorage ? "on" : "off");
+
+        json += "}";
+        return json;
+    }
 };
 
 #endif

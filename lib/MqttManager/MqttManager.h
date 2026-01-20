@@ -25,6 +25,9 @@ public:
         client.setServer(server, port);
         client.setCallback(callback); // 设置收到指令时的处理函数
 
+        // 默认只有 256，发长 JSON 会失败
+        client.setBufferSize(512);
+
         // 新增：设置心跳为 60 秒 (默认是 15 秒)
         // 这样服务器会更宽容，允许最长 90 秒的静默
         client.setKeepAlive(60);

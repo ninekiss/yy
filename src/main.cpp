@@ -1,133 +1,164 @@
 #include <Arduino.h>
+#include <esp_task_wdt.h> // 引入看门狗库
+
 #include "NetworkManager.h"
 #include "TimeManager.h"
 #include "WateringSystem.h"
-#include <MqttManager.h>
+#include "MqttManager.h"
+#include "OtaManager.h" // 引入 OTA
 
 // ================= 实例化模块 =================
-
-// 1. 网络模块
 NetworkManager wifiMgr(WIFI_SSID, WIFI_PASSWORD);
-
-// 2. 时间模块
 TimeManager timeMgr;
-
-// 3. 浇水模块 (GPIO 4, 38秒, 2点0分, 间隔3天, 18次)
-WateringSystem waterSys(SYSTEM_WATERING_PIN, SYSTEM_WATERING_DURATION, SYSTEM_WATERING_START_HOUR, SYSTEM_WATERING_START_MINUTE, SYSTEM_WATERING_INTERVAL_DAYS, SYSTEM_WATERING_COUNT, ENABLE_NVS);
-
+// 使用 secrets.ini 里的 OTA_PASS 密码
+OtaManager otaMgr("esp32-watering", OTA_PASS);
 MqttManager mqttMgr(MQTT_SERVER, MQTT_PORT, MQTT_USER, MQTT_PASS);
 
-// A. 当 MQTT 收到消息时
+// 传入 ENABLE_NVS 宏
+WateringSystem waterSys(SYSTEM_WATERING_PIN, SYSTEM_WATERING_DURATION, SYSTEM_WATERING_START_HOUR, SYSTEM_WATERING_START_MINUTE, SYSTEM_WATERING_INTERVAL_DAYS, SYSTEM_WATERING_COUNT, ENABLE_NVS);
+
+// ================= 辅助函数 =================
+void reportDeviceStatus()
+{
+    if (!mqttMgr.isConnected())
+        return;
+    String info = waterSys.getSystemInfoJson();
+    String ip = WiFi.localIP().toString();
+    String payload = "{\"event\":\"boot\", \"ip\":\"" + ip + "\", \"system\":" + info + ", \"ota_version\":\"0.2.0\"}";
+    mqttMgr.publish(MQTT_TOPIC_STATUS, payload.c_str());
+}
+
 void onMqttMessage(char *topic, uint8_t *payload, unsigned int length)
 {
     String msg = "";
     for (int i = 0; i < length; i++)
         msg += (char)payload[i];
-
     Serial.printf("[MQTT] Recv [%s]: %s\n", topic, msg.c_str());
-    // 判断指令
+
     if (String(topic) == MQTT_TOPIC_CMD)
     {
         msg.toLowerCase();
-
         if (msg == "start" || msg == "on")
-        {
-            waterSys.forceWatering(); // 调用浇水系统
-        }
+            waterSys.forceWatering();
         else if (msg == "stop" || msg == "off")
-        {
             waterSys.stopWatering();
-        }
-        else if (msg == "kill" || msg == "shutdown")
-        {
-            waterSys.killSystem();
-        }
-        else if (msg == "revive" || msg == "enable")
-        {
-            waterSys.reviveSystem();
-        }
         else if (msg == "reset")
-        {
             waterSys.resetSystem();
-        }
+        else if (msg == "kill")
+            waterSys.killSystem();
+        else if (msg == "revive")
+            waterSys.reviveSystem();
+        else if (msg == "info" || msg == "status")
+            reportDeviceStatus();
     }
 }
 
-// B. 当浇水系统有状态变化时
 void onWateringEvent(const char *statusMsg)
 {
-    // 发送 MQTT 消息
     mqttMgr.publish(MQTT_TOPIC_STATUS, statusMsg);
 }
 
+// ================= SETUP =================
 void setup()
 {
     Serial.begin(115200);
     delay(1000);
+    Serial.println("\n==== System Booting(OTA v0.2.0)  ====");
 
-    // 各个模块独立初始化
-    wifiMgr.connect(); // 连网
-    timeMgr.begin();   // 开启 NTP 配置
-    waterSys.begin();  // 初始化 GPIO
+    // 3. 检查内存分配能力
+    // 尝试在 PSRAM 中申请 1MB 空间
+    uint8_t *testPtr = (uint8_t *)ps_malloc(1024 * 1024);
+    if (testPtr)
+    {
+        Serial.println("内存测试: 成功在 PSRAM 申请 1MB 空间!");
+        free(testPtr);
+    }
+    else
+    {
+        Serial.println("内存测试: PSRAM 申请失败!");
+    }
 
-    // 1. 设置 MQTT 回调：收到消息 -> onMqttMessage
+    // 1. 初始化看门狗 (30秒超时)
+    // 如果系统卡死超过30秒不喂狗，自动重启
+    esp_task_wdt_init(30, true);
+    esp_task_wdt_add(NULL);
+
+    // 2. 初始化各模块
+    waterSys.begin();
+    timeMgr.begin();
     mqttMgr.begin(onMqttMessage);
 
-    // 2. 设置 浇水系统 回调：状态变化 -> onWateringEvent
-    // 这里使用了 Lambda 表达式，非常优雅地连接了两个模块
+    // 3. 绑定回调
     waterSys.setNotifier([](const char *msg)
                          { onWateringEvent(msg); });
 
-    // 注入 MQTT 心跳维护逻辑
-    // 告诉浇水系统：你在干活的间隙，记得帮我跑一下 mqttMgr.loop()
+    // 绑定呼吸逻辑 (包含 MQTT 循环 和 喂狗)
     waterSys.setYieldCallback([]()
                               {
-        // 只有连网的时候才跑，防止报错
-        if (wifiMgr.isConnected()) {
-            mqttMgr.loop(); 
-        } });
+        // 浇水时也要处理 MQTT，防止断连
+        if (wifiMgr.isConnected()) mqttMgr.loop(); 
+        // 关键：浇水时也要喂狗，防止浇水38秒超过看门狗30秒限制
+        esp_task_wdt_reset();
+        // 3. 【新增】处理 OTA 请求
+        // 这样即使正在浇水，也能接收固件升级！
+        otaMgr.handle();
+    });
 
-    // 如果需要，可以在这里阻塞等待时间同步
+    
+
+    // 4. 启动网络 (带冷却机制，防止死循环)
+    wifiMgr.connect();
+
+    // 5. 联网后操作
     if (wifiMgr.isConnected())
     {
+        Serial.print("WiFi Connected. IP: ");
+        Serial.println(WiFi.localIP());
+
+        // A. 启动 OTA 服务
+        otaMgr.begin();
+
+        // B. 连接 MQTT 并上报
+        mqttMgr.connect();
+        reportDeviceStatus();
+
+        // C. 同步时间
         timeMgr.waitForSync();
     }
+    else
+    {
+        Serial.println("WiFi Failed! Running offline mode.");
+    }
+
+    Serial.println("==== System Ready ====");
 }
 
+// ================= LOOP =================
 void loop()
 {
-    // 1. 确保网络在线 (NetworkManager 内部处理重连逻辑)
-    // 这里的实现比较简单，如果断网了，NTP 实际上会依赖内部晶振走时
+    // 1. 喂狗 (防止主循环卡死)
+    esp_task_wdt_reset();
+
+    // 2. 处理 OTA 请求
+    otaMgr.handle();
+
+    // 3. 网络维护
     if (!wifiMgr.isConnected())
     {
-        wifiMgr.connect();
+        wifiMgr.connect(); // 内部有冷却时间，不会一直卡这里
     }
     else
     {
-        // 只有网络通的时候才处理 MQTT
         if (!mqttMgr.isConnected())
-        {
             mqttMgr.connect();
-        }
-        mqttMgr.loop(); // 处理收发
+        mqttMgr.loop();
     }
 
-    // 2. 从 TimeManager 获取当前时间数据
+    // 4. 业务逻辑
     struct tm currentTime;
-    bool timeValid = timeMgr.getTime(currentTime);
-
-    // 3. 如果时间有效，就把时间数据“喂”给浇水系统
-    if (timeValid)
+    if (timeMgr.getTime(currentTime))
     {
-        // 主程序作为中介，把 TimeManager 的数据传给 WateringSystem
-        // 实现了 WateringSystem 和 TimeManager 的彻底解耦
         waterSys.update(currentTime);
-
-        // (可选) 可以在这里把时间传给其他系统，比如 "DisplaySystem.update(currentTime)"
-    }
-    else
-    {
-        Serial.println("Time not synced yet...");
     }
 
     delay(1000);
