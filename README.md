@@ -1,23 +1,28 @@
 # ESP32-S3 智能自动浇水系统 (Smart Watering System)
 
-这是一个基于 ESP32-S3 的高可靠性自动浇水系统。项目采用**模块化架构设计**，实现了逻辑与硬件的彻底解耦，并包含完整的**单元测试**（Native & Embedded）体系。
+这是一个基于 ESP32-S3 的企业级高可靠性自动浇水系统。项目采用**模块化架构设计**，实现了逻辑与硬件的彻底解耦。不仅包含完整的**单元测试**体系，更集成了 **MQTT 物联网远程控制**、**生命周期管理**及**断电记忆**功能。
 
 ## ✨ 主要特性
 
-- **精准定时**：通过 NTP 同步网络时间，并在指定时间（如凌晨 2:00）触发任务。
-- **断电记忆 (Persistence)**：利用 NVS (Preferences) 保存浇水次数和日期，防止断电导致任务重置。
-- **逻辑解耦**：核心算法 (`WateringCore`) 与硬件驱动 (`WateringSystem`) 分离，支持本机极速测试。
+- **精准定时**：通过 NTP 同步网络时间，并在指定时间（如凌晨 2:00）自动触发。
+- **断电记忆 (Persistence)**：利用 NVS (Preferences) 保存浇水次数、日期及系统状态（Kill/Active），断电重启后自动恢复进度。
+- **IoT 远程控制 (MQTT)**：
+  - **实时指令**：支持 `start` / `stop` / `reset` / `kill` / `revive` 五大指令。
+  - **状态反馈**：实时上报运行状态（如 `Manual Start [1/18]`, `Aborted`, `Done`）。
+  - **心跳维持**：采用 Yield Callback 机制，防止长时浇水导致 MQTT 断连。
+- **并发安全 (Concurrency Safety)**：
+  - **状态锁**：防止在浇水过程中重复触发指令。
+  - **冲突保护**：防止在系统忙碌时误操作 Reset。
+- **逻辑解耦**：核心算法 (`WateringCore`) 与硬件驱动 (`WateringSystem`) 分离，互不依赖。
 - **双环境测试**：
   - **Native**: 在电脑上验证核心数学逻辑。
-  - **Embedded**: 在 ESP32 上验证硬件联动和灯光反馈。
-- **状态反馈**：集成 NeoPixel RGB 灯，测试通过显示绿灯，失败闪烁红灯。
-- **安全配置**：WiFi 凭证通过 `secrets.ini` 注入，不硬编码在源码中。
+  - **Embedded**: 在 ESP32 真机上验证 NVS 读写、GPIO 控制及系统集成逻辑。
 
 ## 🛠️ 硬件要求
 
 - **开发板**: ESP32-S3 DevKitC-1 (或兼容板)
 - **执行器**: 5V 水泵 + 继电器模块 (低电平触发)
-- **电源**: 5V USB 供电 (推荐插座供电，**不建议**使用移动电源)
+- **电源**: 5V 插座供电 (**禁止**使用充电宝，以免因电流过小自动关机)
 - **指示灯**: 板载 WS2812B RGB 灯 (默认 GPIO 48)
 
 ### 接线说明
@@ -35,15 +40,15 @@
 ├── lib/
 │   ├── WateringCore/      # [大脑] 纯数学逻辑，无硬件依赖
 │   ├── NetworkManager/    # [网络] WiFi 连接管理
-│   ├── TimeManager/       # [时间] NTP 同步管理
-│   ├── WateringSystem/    # [四肢] 业务总管，整合逻辑与硬件，含 NVS 存储
+│   ├── MqttManager/       # [通信] MQTT 协议封装，含自动重连机制
+│   ├── WateringSystem/    # [四肢] 业务总管，含 NVS 存储、状态锁、回调接口
 │   └── TestIndicator/     # [工具] 测试结果的灯光反馈
 ├── src/
-│   └── main.cpp           # [入口] 组装各个模块
+│   └── main.cpp           # [入口] 依赖注入 (Dependency Injection) 与模块组装
 ├── test/
 │   ├── common/            # 公共测试逻辑 (Native 与 Embedded 共享)
-│   ├── test_native/       # 本机测试入口
-│   └── test_embedded/     # 硬件测试入口
+│   ├── test_native/       # 本机测试入口 (CI/CD 友好)
+│   └── test_embedded/     # 硬件集成测试入口 (NVS/Kill/Reset 测试)
 ├── secrets.ini            # 敏感配置文件 (需手动创建)
 └── platformio.ini         # PIO 配置文件
 ```
@@ -58,9 +63,17 @@
 [secrets]
 wifi_ssid = 你的WiFi名称
 wifi_pass = 你的WiFi密码
-```
 
-或复制 `secrets.ini.example` 并修改其中的内容。
+; MQTT配置 (推荐使用 broker.emqx.io 测试)
+mqtt_server = broker.emqx.io
+mqtt_port = 1883
+mqtt_user = 
+mqtt_pass = 
+
+; 定义你的唯一 Topic (建议加上随机后缀防止冲突)
+mqtt_topic_cmd = your_unique_id/watering/cmd
+mqtt_topic_status = your_unique_id/watering/status
+```
 
 ### 2. 编译与上传
 
@@ -69,25 +82,68 @@ wifi_pass = 你的WiFi密码
 - 选择 `env:esp32-s3-devkitc-1` -> `General` -> `Upload`。
 - 或点击底部状态栏的 `→` 箭头。
 
+### 3. OTA 无线升级 (Over-The-Air)
+
+无需 USB 线，支持通过 WiFi 远程更新固件。
+
+1.  **首次烧录**: 必须使用 USB 线，通过 `env:esp32-s3-devkitc-1` 上传。
+2.  **获取 IP**: 首次运行后，在串口监视器中查看设备 IP 地址 (例如 `192.168.1.50`)。
+3.  **配置 OTA**: 修改 `platformio.ini` 中的 `upload_port` 为设备 IP。
+4.  **无线上传**: 选择 `env:esp32-ota` 环境，点击 Upload。
+
+## 🛡️ 系统稳定性机制
+
+为了确保设备长期无人值守运行，系统内置了多重保障：
+
+1.  **硬件看门狗 (WDT)**:
+    - 超时时间设为 30 秒。
+    - 如果系统死机或卡死，会自动重启。
+    - 在浇水延时期间通过 `Yield Callback` 持续喂狗。
+2.  **断网重连**:
+    - `NetworkManager` 负责 WiFi 掉线后的自动重连。
+    - `MqttManager` 负责 MQTT 断开后的自动重连。
+3.  **并发锁**:
+    - 防止指令冲突（如在浇水时 Reset）。
+    - 防止递归调用。
+
+## 🎮 MQTT 指令手册
+
+通过 MQTT 客户端向 Topic `.../watering/cmd` 发送以下文本指令：
+
+| 指令 | 作用 | 详细说明 |
+| :--- | :--- | :--- |
+| `start` | **立即浇水** | 强制开始一次浇水循环（不计入自动任务次数）。如果系统正在忙或被 Kill，则忽略。 |
+| `stop` | **紧急停止** | 立即中断当前的浇水进程。本次任务标记为 Aborted。 |
+| `reset` | **任务重置** | 将浇水计数器归零 (`Count=0`)。**仅当系统空闲时有效**。 |
+| `kill` | **系统停用** | 彻底禁用自动任务。状态写入 Flash，重启后依然生效。用于长期维护。 |
+| `revive` | **系统复活** | 恢复 `kill` 状态，系统重新上线。 |
+
 ## 🧪 测试指南
 
 本项目支持 TDD (测试驱动开发)。
 
-### 运行逻辑测试 (Native)
+### 1. 运行逻辑测试 (Native)
 
 _用于快速验证算法准确性（跨年逻辑、间隔天数等）。_
 
 - 运行命令：`pio test -e native`
-- 或在 PIO 侧边栏选择 `native` -> `Advanced` -> `Test`。
 
-### 运行硬件测试 (Embedded)
+### 2. 运行系统集成测试 (Embedded)
 
-_用于验证硬件联动及 RGB 灯光反馈。_
+_用于验证 NVS 持久化、Kill 开关逻辑、Reset 逻辑及硬件联动。_
 
 - 运行命令：`pio test -e esp32-s3-devkitc-1`
 - **反馈效果**：
   - 🟢 **绿灯常亮**：所有测试通过。
   - 🔴 **红灯闪烁**：有测试失败。
+### 3. 手动测试代码
+源码中包含部分手动验证代码（用于调试特定硬件行为），已被注释包裹。
+如需启用，请搜索标记：
+```C++
+// MTEST:START
+// ... code ...
+// MTEST:END
+```
 
 ## ⚙️ 默认参数
 
@@ -95,3 +151,6 @@ _用于验证硬件联动及 RGB 灯光反馈。_
 - **间隔周期**: 每 3 天
 - **单次时长**: 38 秒
 - **最大次数**: 18 次
+- **MQTT 心跳**: 60 秒 (防止长时浇水断连)
+
+

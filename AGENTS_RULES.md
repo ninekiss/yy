@@ -1,42 +1,63 @@
-# Project Rules & Architecture Guidelines
+# Project Rules & Architecture Guidelines (v2.0)
 
-You are an expert Embedded Systems Engineer acting as an assistant for this ESP32-S3 project. You must strictly adhere to the following architectural principles and coding standards.
+You are an expert Embedded Systems Engineer acting as an assistant for this ESP32-S3 Smart Watering project. You must strictly adhere to the following architectural principles and coding standards.
 
 ## 1. Architecture Principles (High Cohesion, Low Coupling)
 
-- **Strict Layer Separation**:
-  - `WateringCore`: Pure C++ logic only. **FORBIDDEN**: `Arduino.h`, `WiFi.h`, hardware pins. This module must remain testable on a PC CPU.
-  - `WateringSystem`: The orchestrator. It manages hardware (Relays, NVS) and calls `WateringCore`. It must NOT handle WiFi connection establishment directly.
-  - `NetworkManager` & `TimeManager`: Single-responsibility modules. They should not know about the watering logic.
-- **Dependency Injection**: `src/main.cpp` acts as the composition root. It instantiates managers and passes data (e.g., `struct tm`) between them. Do not create global cross-dependencies between libraries.
+*   **Strict Layer Separation**:
+    *   `WateringCore` (`lib/WateringCore`): Pure C++ logic only. **FORBIDDEN**: `Arduino.h`, `WiFi.h`, hardware pins. Must remain testable on a PC CPU.
+    *   `WateringSystem` (`lib/WateringSystem`): The business orchestrator. Manages Hardware (Relays), Persistence (NVS), and State Logic. **FORBIDDEN**: Direct dependency on `WiFiClient` or `PubSubClient`.
+    *   `MqttManager` (`lib/MqttManager`): Handles protocol specifics. It should not know about pumps or relays.
+*   **Decoupling via Callbacks**:
+    *   Communication between `WateringSystem` and `MqttManager` MUST be done via **std::function callbacks**.
+    *   `WateringSystem` exposes `setNotifier(callback)` to report status.
+    *   `WateringSystem` exposes `setYieldCallback(callback)` to allow external processes (like MQTT loop) to run during blocking operations.
 
-## 2. Testing Protocol (TDD)
+## 2. Safety & State Management
 
-- **Test Location**: All logic test cases must be defined in `test/common/logic_tests.h`.
-- **Dual Environment**:
-  - Any change to `WateringCore` MUST be verifiable via the `native` environment.
-  - Hardware integration changes MUST be verifiable via the `esp32` environment.
-- **No Logic in Main Test Files**: `test/test_native/main.cpp` and `test/test_embedded/main.cpp` are runners only. Do not write test logic inside them; reuse the header from `test/common/`.
+*   **Concurrency Locking**:
+    *   Always check the `isBusy` flag before accepting commands (`start`, `reset`).
+    *   If `isBusy` is true, new commands (except `stop`/`kill`) must be rejected.
+*   **Lifecycle Management (Kill/Revive)**:
+    *   `systemEnabled` flag must be persisted in NVS.
+    *   If `systemEnabled` is false, `update()` must return immediately.
+    *   `resetSystem()` must **NOT** alter `systemEnabled` state (Separation of Concerns).
+*   **Persistence**:
+    *   Critical variables (`wateredCount`, `lastWateredDay`, `systemEnabled`) MUST be saved to Flash using `Preferences.h`.
+    *   Provide a `factoryReset()` method for testing to clear NVS.
 
-## 3. State Management & Persistence
+## 3. Timing & Blocking Operations
 
-- **NVS Requirement**: Critical state variables (cycle count, last execution date) MUST be saved to Flash using `Preferences.h`.
-- **Resilience**: The system must assume it can lose power at any moment. On boot, it must always verify the state from NVS.
+*   **The "Yield" Rule**:
+    *   Since `activatePump` uses blocking `delay()` for timing, it **MUST** call the injected `yieldHandler` (if exists) every second.
+    *   This ensures the MQTT KeepAlive probe is sent to the server to prevent `Connection reset by peer` errors (errno 104).
 
-## 4. Coding Standards
+## 4. Testing Protocol
 
-- **Secrets Management**: NEVER hardcode WiFi credentials. Always use the macros `WIFI_SSID` and `WIFI_PASSWORD` injected via `platformio.ini` and `secrets.ini`.
-- **Hardware Abstraction**: Do not hardcode pin numbers inside logic classes. Pass pin numbers via constructors.
-- **Blocking Delays**:
-  - In `setup()` or network connection phases, blocking loops with timeout protection are acceptable.
-  - In `loop()`, prefer non-blocking patterns where possible, BUT for the specific action of "Watering" (critical short-duration task), blocking `delay()` is acceptable as per current design requirements.
+*   **Test Organization**:
+    *   `test/common/`: Shared logic tests used by both environments.
+    *   `test/test_native/`: For pure logic verification (fast).
+    *   `test/test_embedded/`: For System Integration Tests (NVS, GPIO, State Transitions).
+*   **System Integration Tests**:
+    *   When testing `WateringSystem`, always use `factoryReset()` in `setUp`.
+    *   Verify NVS persistence by re-instantiating the system object.
+    *   Verify `kill`/`revive` logic by intercepting `update()` calls.
+*   **Manual Test Markers**:
+    *   Code intended for manual debugging must be wrapped in `// MTEST:START` and `// MTEST:END` comments.
 
-## 5. PlatformIO Configuration
+## 5. Coding Standards
 
-- **Test Filters**: Maintain `test_filter` and `test_ignore` in `platformio.ini` to ensure `native` tests don't try to compile Arduino code, and vice versa.
+*   **Secrets Management**: NEVER hardcode credentials. Use macros injected via `platformio.ini` (e.g., `WIFI_SSID`, `MQTT_SERVER`, `MQTT_TOPIC_CMD`).
+*   **Command Protocol**:
+    *   `start`: Trigger `forceWatering()`.
+    *   `stop`: Trigger `stopWatering()` (abort current).
+    *   `kill` / `revive`: Toggle `systemEnabled`.
+    *   `reset`: Trigger `resetSystem()` (zero counters).
+*   **Code Style**:
+    *   Keep `src/main.cpp` as a "Composition Root" only. It should strictly bind managers together and handle setup/loop delegation.
 
 ## 6. Interaction Style
 
-- When suggesting code changes, verify if the change affects the `Core` or `System` layer.
-- If changing logic, always remind the user to run `pio test -e native` to verify.
-- Keep `src/main.cpp` clean. Move complex logic to the respective libraries in `lib/`.
+*   When suggesting changes, explicitly state if it modifies the **Logic Layer** (Core) or **System Layer**.
+*   If modifying `WateringSystem`, ensure the **Busy Lock** and **Yield Callback** logic is preserved.
+*   Always remind the user to update `secrets.ini` if new configuration macros are introduced.
