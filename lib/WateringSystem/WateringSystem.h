@@ -30,6 +30,7 @@ private:
     bool isBusy = false;
     bool stopRequested = false;
     bool systemEnabled = true; // 系统总开关
+    char systemInfo[128];
 
     // 私有动作：干活
     void activatePump(bool isManual = false)
@@ -168,6 +169,14 @@ public:
         {
             Serial.println("[Watering] Persistence DISABLED. State will reset on reboot.");
         }
+
+        snprintf(systemInfo, sizeof(systemInfo),
+                 "[Watering] System Info: pin: %d, duration: %ds, target_time: %02d:%02d:00, interval: %d days, max cycles: %d",
+                 relayPin, durationSec,
+                 logic.targetHour, logic.targetMin,
+                 logic.intervalDays,
+                 logic.maxCycles);
+        Serial.println(systemInfo);
     }
 
     // 注册通知回调
@@ -280,7 +289,12 @@ public:
             saveState();
 
             // MTEST:START:模拟隔天
-            // delay(10000);
+            #ifdef SYSTEM_MANUAL_TEST
+            if (SYSTEM_MANUAL_TEST)
+            {
+                delay(10000);
+            }
+            #endif
             // MTEST:END
         }
 

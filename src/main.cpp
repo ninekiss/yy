@@ -7,19 +7,13 @@
 // ================= 实例化模块 =================
 
 // 1. 网络模块
-#ifndef WIFI_SSID
-#define WIFI_SSID "your_ssid"
-#endif
-#ifndef WIFI_PASSWORD
-#define WIFI_PASSWORD "your_password"
-#endif
 NetworkManager wifiMgr(WIFI_SSID, WIFI_PASSWORD);
 
 // 2. 时间模块
 TimeManager timeMgr;
 
 // 3. 浇水模块 (GPIO 4, 38秒, 2点0分, 间隔3天, 18次)
-WateringSystem waterSys(4, 38, 18, 15, 3, 18, ENABLE_NVS);
+WateringSystem waterSys(SYSTEM_WATERING_PIN, SYSTEM_WATERING_DURATION, SYSTEM_WATERING_START_HOUR, SYSTEM_WATERING_START_MINUTE, SYSTEM_WATERING_INTERVAL_DAYS, SYSTEM_WATERING_COUNT, ENABLE_NVS);
 
 MqttManager mqttMgr(MQTT_SERVER, MQTT_PORT, MQTT_USER, MQTT_PASS);
 

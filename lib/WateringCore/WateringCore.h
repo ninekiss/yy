@@ -25,7 +25,10 @@ public:
     if (wateredCount >= maxCycles)
       return false;
     // MTEST:START测试
-    // return true;
+    #ifdef SYSTEM_MANUAL_TEST
+    if (SYSTEM_MANUAL_TEST)
+      return true;
+    #endif
     // MTEST:END测试结束
     if (currentHour != targetHour || currentMin != targetMin)
       return false;
