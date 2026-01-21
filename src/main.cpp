@@ -24,7 +24,7 @@ void reportDeviceStatus()
         return;
     String info = waterSys.getSystemInfoJson();
     String ip = WiFi.localIP().toString();
-    String payload = "{\"event\":\"boot\", \"ip\":\"" + ip + "\", \"system\":" + info + ", \"ota_version\":\"0.2.0\"}";
+    String payload = "{\"event\":\"boot\", \"ip\":\"" + ip + "\", \"system\":" + info + ", \"ota_version\":\"0.2.1\"}";
     mqttMgr.publish(MQTT_TOPIC_STATUS, payload.c_str());
 }
 
@@ -65,18 +65,6 @@ void setup()
     delay(1000);
     Serial.println("\n==== System Booting(OTA v0.2.0)  ====");
 
-    // 3. 检查内存分配能力
-    // 尝试在 PSRAM 中申请 1MB 空间
-    uint8_t *testPtr = (uint8_t *)ps_malloc(1024 * 1024);
-    if (testPtr)
-    {
-        Serial.println("内存测试: 成功在 PSRAM 申请 1MB 空间!");
-        free(testPtr);
-    }
-    else
-    {
-        Serial.println("内存测试: PSRAM 申请失败!");
-    }
 
     // 1. 初始化看门狗 (30秒超时)
     // 如果系统卡死超过30秒不喂狗，自动重启

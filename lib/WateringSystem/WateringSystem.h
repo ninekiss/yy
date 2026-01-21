@@ -74,12 +74,19 @@ private:
 
                 // 检查停止信号 (响应也变快了)
                 if (stopRequested)
+                {
                     Serial.println("[Watering] STOP signal received! Aborting...");
-                break;
+                    break;
+                }
 
                 // 频繁处理 OTA 和 MQTT
                 if (yieldHandler)
                     yieldHandler();
+            }
+            if (stopRequested)
+            {
+                Serial.println("[Watering] STOP signal received! Aborting...");
+                break;
             }
         }
 
